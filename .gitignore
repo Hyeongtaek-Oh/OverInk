@@ -1,0 +1,5 @@
+.venv/
+__pycache__/
+*.pyc
+# install.bat이 생성
+overink.ico

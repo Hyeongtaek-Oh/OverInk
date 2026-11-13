@@ -1,0 +1,3 @@
+# Windows 배치 파일은 어디서 체크아웃해도 CRLF 유지
+*.bat text eol=crlf
+*.sh text eol=lf
