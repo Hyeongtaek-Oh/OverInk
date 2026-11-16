@@ -19,7 +19,7 @@
   Ctrl+Alt+Q  종료
 
 기본 그리기 모드 단축키
-  P 펜 · H 형광펜 · A 화살표 · R 사각형 · O 원 · E 지우개
+  P 펜 · H 형광펜 · A 화살표 · R 사각형 · O 원 · T 텍스트 · E 지우개
   1~6 기본 색 · 7 최근 사용자 색 · I 화면에서 색 추출(스포이드) · [ / ] 굵기 · Ctrl+Z 실행취소 · Ctrl+Shift+Z 다시실행
   C 전체 지우기 · Esc 투과 모드로 전환
   (고정) 휠 굵기 · Shift 누른 채 펜 = 직선 · 우클릭 드래그 지우개
@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -36,16 +37,18 @@ from PyQt6.QtCore import (
     QEvent, QKeyCombination, QObject, QPoint, QPointF, QRect, QRectF, Qt, QTimer, pyqtSignal,
 )
 from PyQt6.QtGui import (
-    QAction, QColor, QCursor, QFont, QGuiApplication, QIcon, QKeySequence, QPainter,
-    QPainterPath, QPainterPathStroker, QPen, QPixmap, QRegion,
+    QAbstractTextDocumentLayout, QAction, QColor, QCursor, QFont, QGuiApplication, QIcon,
+    QKeySequence, QPainter, QPainterPath, QPainterPathStroker, QPalette, QPen, QPixmap, QRegion,
+    QTextDocument, QTextOption,
 )
 from PyQt6.QtWidgets import (
     QApplication, QButtonGroup, QColorDialog, QDialog, QDialogButtonBox, QFrame, QGridLayout,
     QHBoxLayout, QKeySequenceEdit, QLabel, QMenu, QPushButton, QScrollArea,
-    QSystemTrayIcon, QToolTip, QToolButton, QVBoxLayout, QWidget,
+    QSystemTrayIcon, QTextEdit, QToolTip, QToolButton, QVBoxLayout, QWidget,
 )
 
-PEN, HIGHLIGHT, ARROW, RECT, ELLIPSE, ERASER = "pen", "highlight", "arrow", "rect", "ellipse", "eraser"
+PEN, HIGHLIGHT, ARROW, RECT, ELLIPSE, TEXT, ERASER = (
+    "pen", "highlight", "arrow", "rect", "ellipse", "text", "eraser")
 # 툴팁의 {id} 자리에는 현재 설정된 단축키가 "  [키]" 형태로 들어감
 TOOLS = [
     (PEN, "✎", "펜 — 자유롭게 그리기{pen}\nShift 누른 채 그리면 직선"),
@@ -53,6 +56,9 @@ TOOLS = [
     (ARROW, "➚", "화살표 — 드래그한 방향으로 화살표{arrow}"),
     (RECT, "▭", "사각형 — 드래그해서 영역 표시{rect}"),
     (ELLIPSE, "◯", "원 — 드래그해서 타원 그리기{ellipse}"),
+    (TEXT, "T", "텍스트 — 클릭한 곳에 글자 입력{text}\n"
+                "한글·특수문자·이모지, 붙여넣기(Ctrl+V) 가능 · Enter 줄바꿈\n"
+                "Esc 또는 바깥 클릭으로 완료 · 글자 크기는 굵기(휠·[ ])로 조절"),
     (ERASER, "⌫", "지우개 — 닿은 획을 통째로 지움{eraser}\n우클릭 드래그로도 지울 수 있음"),
 ]
 COLORS = ["#ff3b30", "#ffcc00", "#34c759", "#0a84ff", "#ffffff", "#000000"]
@@ -69,6 +75,7 @@ KEY_ACTIONS = [
     (ARROW, "화살표", "A", False),
     (RECT, "사각형", "R", False),
     (ELLIPSE, "원", "O", False),
+    (TEXT, "텍스트", "T", False),
     (ERASER, "지우개", "E", False),
     *[(f"color{i + 1}", f"색: {n}", str(i + 1), False) for i, n in enumerate(COLOR_NAMES)],
     ("color7", "색: 최근 사용자 색", "7", False),
@@ -115,6 +122,30 @@ MIN_W, MAX_W = 1, 60
 CONFIG_PATH = Path.home() / ".config" / "overink.json"
 
 
+def text_px(width: float) -> int:
+    """펜 굵기 → 글자 크기(px). 기본 굵기 4 → 24px."""
+    return round(12 + width * 3)
+
+
+def text_font(width: float) -> QFont:
+    f = QFont(QGuiApplication.font())
+    f.setPixelSize(text_px(width))
+    f.setWeight(QFont.Weight.Bold)
+    return f
+
+
+def make_text_doc(text: str, width: float) -> QTextDocument:
+    """입력 상자(QTextEdit)와 같은 방식으로 배치한 문서 → 완료 후에도 글자 위치가 그대로."""
+    doc = QTextDocument()
+    doc.setDocumentMargin(0)
+    doc.setDefaultFont(text_font(width))
+    opt = QTextOption()
+    opt.setWrapMode(QTextOption.WrapMode.NoWrap)
+    doc.setDefaultTextOption(opt)
+    doc.setPlainText(text)
+    return doc
+
+
 def load_config() -> dict:
     try:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
@@ -151,8 +182,15 @@ class Stroke:
     color: QColor
     width: float
     points: list[QPointF] = field(default_factory=list)
+    text: str = ""
     _path: QPainterPath | None = None
     _hit: QPainterPath | None = None
+    _doc: QTextDocument | None = None
+
+    def doc(self) -> QTextDocument:
+        if self._doc is None:
+            self._doc = make_text_doc(self.text, self.width)
+        return self._doc
 
     # ---- geometry -------------------------------------------------------
     def path(self) -> QPainterPath:
@@ -186,6 +224,8 @@ class Stroke:
             p.addRect(QRectF(a, b).normalized())
         elif self.tool == ELLIPSE:
             p.addEllipse(QRectF(a, b).normalized())
+        elif self.tool == TEXT:  # 글자가 차지하는 사각형 (지우개 판정용)
+            p.addRect(QRectF(a, self.doc().size()))
         self._path = p
         return p
 
@@ -201,6 +241,8 @@ class Stroke:
             -margin, -margin, margin, margin).toAlignedRect()
 
     def hit_shape(self) -> QPainterPath:
+        if self._hit is None and self.tool == TEXT:
+            self._hit = self.path()  # 테두리가 아니라 글자 상자 안 전체
         if self._hit is None:
             s = QPainterPathStroker()
             s.setWidth(max(self.width, 6))
@@ -210,6 +252,14 @@ class Stroke:
     # ---- drawing --------------------------------------------------------
     def paint(self, qp: QPainter):
         color = QColor(self.color)
+        if self.tool == TEXT:
+            ctx = QAbstractTextDocumentLayout.PaintContext()
+            ctx.palette.setColor(QPalette.ColorRole.Text, color)
+            qp.save()
+            qp.translate(self.points[0])
+            self.doc().documentLayout().draw(qp, ctx)
+            qp.restore()
+            return
         if self.tool == HIGHLIGHT:
             color.setAlpha(90)
             pen = QPen(color, self.width * 3, Qt.PenStyle.SolidLine,
@@ -220,6 +270,65 @@ class Stroke:
         qp.setPen(pen)
         qp.setBrush(Qt.BrushStyle.NoBrush)
         qp.drawPath(self.path())
+
+
+class TextBox(QTextEdit):
+    """오버레이 위에 띄우는 글자 입력 상자. 입력기(한글 등)·붙여넣기는 Qt가 그대로 처리.
+    완료하면 Overlay.commit_text()가 같은 배치의 TEXT 획으로 바꿔 넣음."""
+
+    def __init__(self, ov: "Overlay", anchor: QPointF):
+        super().__init__(ov)
+        self.ov = ov
+        self.anchor = anchor
+        self.setFrameShape(QFrame.Shape.NoFrame)
+        self.setAcceptRichText(False)
+        self.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.setWordWrapMode(QTextOption.WrapMode.NoWrap)
+        self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.setViewportMargins(0, 0, 0, 0)
+        self.document().setDocumentMargin(0)
+        self.viewport().setAutoFillBackground(False)
+        self.setAttribute(Qt.WidgetAttribute.WA_InputMethodEnabled)
+        self.document().documentLayout().documentSizeChanged.connect(lambda _: self.fit())
+        self.apply_style()
+
+    def apply_style(self):
+        c = self.ov.color.name()
+        self.setFont(text_font(self.ov.pen_width))
+        self.document().setDefaultFont(text_font(self.ov.pen_width))
+        self.setCursorWidth(max(2, text_px(self.ov.pen_width) // 12))
+        self.setStyleSheet(f"QTextEdit {{ background: transparent; border: none; color: {c};"
+                           f" selection-background-color: rgba(10,132,255,150); selection-color: {c}; }}")
+        self.fit()
+
+    def fit(self):
+        old = self.geometry().adjusted(-8, -8, 8, 8)
+        size = self.document().size()
+        px = text_px(self.ov.pen_width)
+        w = math.ceil(size.width()) + self.cursorWidth() + 2
+        h = max(math.ceil(size.height()), math.ceil(px * 1.2))
+        self.setGeometry(QRect(self.anchor.toPoint(), QPoint(self.anchor.toPoint()) + QPoint(w - 1, h - 1)))
+        self.ov.update(old.united(self.geometry().adjusted(-8, -8, 8, 8)))
+
+    def keyPressEvent(self, e):
+        k = e.key()
+        if k == Qt.Key.Key_Escape or (k in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                                      and e.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            return self.ov.commit_text()
+        super().keyPressEvent(e)
+        self.ensureCursorVisible()
+        self.horizontalScrollBar().setValue(0)  # 상자가 글자에 맞춰 커지므로 스크롤 고정
+        self.verticalScrollBar().setValue(0)
+
+    def wheelEvent(self, e):  # 스크롤 대신 글자 크기 조절
+        self.ov.change_width(1 if e.angleDelta().y() > 0 else -1)
+        e.accept()
+
+    def enterEvent(self, e):  # 상자 위에선 오버레이가 그리는 커서를 감춤 (I-빔 커서 사용)
+        self.ov.cursor_in = False
+        self.ov.update(self.ov._cursor_rect())
+        super().enterEvent(e)
 
 
 class Overlay(QWidget):
@@ -262,6 +371,7 @@ class Overlay(QWidget):
         self._label_timer = QTimer(self, singleShot=True, interval=900)
         self._label_timer.timeout.connect(self._hide_size_label)
         self._cache: QPixmap | None = None
+        self.textbox: TextBox | None = None
 
         self.keys: dict[str, str] = self.config["keys"]
         self._key_actions = {t: (lambda t=t: self.set_tool(t)) for t, _, _ in TOOLS}
@@ -301,6 +411,7 @@ class Overlay(QWidget):
             self.cursor_pos = QPointF(self.mapFromGlobal(QCursor.pos()))
             self.cursor_in = self.rect().contains(self.cursor_pos.toPoint())
         else:
+            self.commit_text()
             self._finish_stroke()
         self.update()
         self.modeChanged.emit(on)
@@ -321,6 +432,7 @@ class Overlay(QWidget):
 
     def dismiss(self):
         """그림을 지우고(Ctrl+Z로 복구 가능) 화면에서 완전히 숨김."""
+        self.commit_text()
         self._finish_stroke()
         if self.picking:
             self.end_eyedropper()
@@ -343,12 +455,14 @@ class Overlay(QWidget):
         self.set_drawing_mode(not self.drawing_mode)
 
     def toggle_visible(self):
+        self.commit_text()
         self.ink_visible = not self.ink_visible
         self.update()
         self.stateChanged.emit()
 
     # ---- settings -------------------------------------------------------
     def set_tool(self, tool: str):
+        self.commit_text()
         self.tool = tool
         self.update()
         self.stateChanged.emit()
@@ -360,6 +474,8 @@ class Overlay(QWidget):
             self.tool = PEN
         if remember:
             self.remember_color(self.color)
+        if self.textbox is not None:
+            self.textbox.apply_style()
         self.update(old_cursor_rect.united(self._cursor_rect()))
         self.stateChanged.emit()
 
@@ -379,6 +495,7 @@ class Overlay(QWidget):
     def start_eyedropper(self):
         if not self.isVisible() or self.picking:
             return
+        self.commit_text()
         self._finish_stroke()
         self._grabbing = True
         self._ink_before_pick = self.ink_visible
@@ -422,6 +539,8 @@ class Overlay(QWidget):
     def change_width(self, delta: float):
         old = self._cursor_rect()
         self.pen_width = max(MIN_W, min(MAX_W, self.pen_width + delta))
+        if self.textbox is not None:
+            self.textbox.apply_style()
         self.show_size_label = True
         self._label_timer.start()
         self.update(old.united(self._cursor_rect()))
@@ -437,6 +556,7 @@ class Overlay(QWidget):
             self._dirty()
 
     def undo(self):
+        self.commit_text()
         if not self.undo_stack:
             return
         act = self.undo_stack.pop()
@@ -444,6 +564,7 @@ class Overlay(QWidget):
         self.redo_stack.append(act)
 
     def redo(self):
+        self.commit_text()
         if not self.redo_stack:
             return
         act = self.redo_stack.pop()
@@ -495,6 +616,7 @@ class Overlay(QWidget):
         self.update(dirty)
 
     def clear(self):
+        self.commit_text()
         if self.strokes:
             self._push(("clear", list(self.strokes)))
             self.strokes = []
@@ -541,6 +663,8 @@ class Overlay(QWidget):
         if self.picking:  # 좌클릭 = 색 선택, 그 외 = 취소
             self.end_eyedropper(pos if e.button() == Qt.MouseButton.LeftButton else None)
             return
+        if self.textbox is not None:  # 입력 중 바깥 클릭 = 입력 완료
+            self.commit_text()
         if e.button() == Qt.MouseButton.RightButton:  # 우클릭 = 임시 지우개
             self.erased_now = []
             self._erase_at(pos)
@@ -553,6 +677,8 @@ class Overlay(QWidget):
             self.erased_now = []
             self._erase_at(pos)
             return
+        if self.tool == TEXT:
+            return self.begin_text(pos)
         self.current = Stroke(self.tool, QColor(self.color), self.pen_width, [pos])
         if self.tool not in (PEN, HIGHLIGHT):
             self.current.points.append(pos)
@@ -599,7 +725,7 @@ class Overlay(QWidget):
             dirty |= QRegion(c.paint_bounds()) | QRegion(self._cursor_rect())
             self.update(dirty)
             return
-        self.update()
+        self.update(old_rect.united(self._cursor_rect()))
 
     def mouseReleaseEvent(self, e):
         if self.erased_now:
@@ -623,6 +749,39 @@ class Overlay(QWidget):
             else:
                 self._push(("add", s))
             self.remember_color(s.color)
+
+    # ---- 텍스트 ---------------------------------------------------------
+    def begin_text(self, pos: QPointF):
+        """클릭한 곳이 첫 줄 세로 가운데가 되도록 입력 상자를 띄움."""
+        half = text_px(self.pen_width) * 0.6
+        # 입력 상자는 정수 좌표에 놓이므로 획 기준점도 맞춰 둠 (완료할 때 글자가 밀리지 않게)
+        self.textbox = TextBox(self, QPointF(round(pos.x()), round(pos.y() - half)))
+        self.textbox.show()
+        self.textbox.setFocus()
+        self.cursor_in = False
+        self.update(self._cursor_rect().united(self.textbox_rect()))
+
+    def textbox_rect(self) -> QRect:
+        """입력 상자 + 점선 테두리 영역."""
+        tb = self.textbox
+        return tb.geometry().adjusted(-8, -8, 8, 8) if tb is not None else QRect()
+
+    def commit_text(self):
+        """입력 중인 글자를 TEXT 획으로 확정 (비어 있으면 그냥 닫음)."""
+        tb = self.textbox
+        if tb is None:
+            return
+        self.textbox = None
+        text = tb.toPlainText().rstrip()
+        area = tb.geometry().adjusted(-8, -8, 8, 8)
+        tb.hide()
+        tb.deleteLater()
+        if self.drawing_mode and self.isVisible():
+            self.setFocus()
+        self.update(area)
+        if text.strip():
+            self.current = Stroke(TEXT, QColor(self.color), self.pen_width, [tb.anchor], text=text)
+            self._finish_stroke()
 
     def _erase_at(self, pos: QPointF):
         r = max(self.pen_width * 2, 12)
@@ -680,6 +839,14 @@ class Overlay(QWidget):
             if self.current is not None:
                 qp.setRenderHint(QPainter.RenderHint.Antialiasing)
                 self.current.paint(qp)
+        if self.textbox is not None:  # 입력 상자 위치 표시 (어떤 배경에서도 보이게 흰/검 점선)
+            r = QRectF(self.textbox.geometry()).adjusted(-5, -3, 5, 3)
+            qp.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+            qp.setBrush(Qt.BrushStyle.NoBrush)
+            qp.setPen(QPen(QColor(0, 0, 0, 160), 1))
+            qp.drawRect(r)
+            qp.setPen(QPen(QColor(255, 255, 255, 220), 1, Qt.PenStyle.DashLine))
+            qp.drawRect(r)
         if self.drawing_mode and self.cursor_in and not self._grabbing:
             if self.picking:
                 self._paint_magnifier(qp)
@@ -692,6 +859,8 @@ class Overlay(QWidget):
             return max(self.pen_width * 2, 12)
         if self.tool == HIGHLIGHT:
             return self.pen_width * 3 / 2
+        if self.tool == TEXT:
+            return text_px(self.pen_width) * 0.6
         return self.pen_width / 2
 
     MAG_N, MAG_CELL = 11, 12  # 돋보기: 11x11 픽셀을 12배 확대
@@ -761,6 +930,13 @@ class Overlay(QWidget):
             qp.setPen(QPen(light, 1.5))
             qp.setBrush(QColor(0, 0, 0, 40))
             qp.drawEllipse(p, r, r)
+        elif self.tool == TEXT:  # 글자 높이만 한 I-빔 (현재 색)
+            s = max(3.0, r * 0.3)
+            for color, w in ((dark, 4.0), (light, 2.5), (QColor(self.color), 1.5)):
+                qp.setPen(QPen(color, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+                qp.drawLine(p + QPointF(0, -r), p + QPointF(0, r))
+                qp.drawLine(p + QPointF(-s, -r), p + QPointF(s, -r))
+                qp.drawLine(p + QPointF(-s, r), p + QPointF(s, r))
         else:
             fill = QColor(self.color)
             fill.setAlpha(90 if self.tool == HIGHLIGHT else 220)
@@ -789,7 +965,7 @@ class Overlay(QWidget):
 
         if self.show_size_label:
             qp.setFont(QFont(qp.font().family(), 10, QFont.Weight.Bold))
-            text = f"{int(self.pen_width)}px"
+            text = f"{text_px(self.pen_width) if self.tool == TEXT else int(self.pen_width)}px"
             box = QRectF(p.x() + r + 6, p.y() + r + 4, 48, 20)
             qp.setPen(Qt.PenStyle.NoPen)
             qp.setBrush(QColor(28, 28, 30, 220))
@@ -1136,7 +1312,7 @@ class Toolbar(QWidget):
                                                  "고른 색이 이 칸에 남음{color7}"))
             self.custom_btn.setStyleSheet(f"QToolButton {{ background:transparent; color:#aaa; font-size:13px; "
                                           f"border:2px dashed rgba(255,255,255,90); padding:0; {dot} }}")
-        self.size_lbl.setText(f"{int(ov.pen_width)}px")
+        self.size_lbl.setText(f"글자 {text_px(ov.pen_width)}px" if ov.tool == TEXT else f"{int(ov.pen_width)}px")
         self.raise_()
 
     # 드래그 이동
@@ -1414,7 +1590,23 @@ def listen_single_instance(on_message) -> object:
     return server
 
 
+def _setup_input_method():
+    """한글 등 입력기: pip로 받은 PyQt6에는 fcitx용 Qt 플러그인이 없어 fcitx 환경에서
+    한글이 안 써짐. fcitx5는 IBus 호환 접속(ibusfrontend)도 받으므로, 플러그인이 없으면
+    PyQt6에 들어 있는 ibus 플러그인으로 연결."""
+    if not sys.platform.startswith("linux"):
+        return
+    im = os.environ.get("QT_IM_MODULE", "")
+    if not im.startswith("fcitx"):
+        return
+    from PyQt6.QtCore import QLibraryInfo
+    plugins = Path(QLibraryInfo.path(QLibraryInfo.LibraryPath.PluginsPath)) / "platforminputcontexts"
+    if not any(plugins.glob("*fcitx*")):
+        os.environ["QT_IM_MODULE"] = "ibus"
+
+
 def main():
+    _setup_input_method()
     app = QApplication(sys.argv)
     app.setApplicationName("OverInk")
     app.setQuitOnLastWindowClosed(False)
