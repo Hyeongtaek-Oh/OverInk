@@ -675,7 +675,7 @@ class Overlay(QWidget):
         if self.textbox is not None:  # 입력 중 바깥 클릭 = 입력 완료
             self.commit_text()
         if e.button() == Qt.MouseButton.RightButton:  # 우클릭 = 임시 지우개
-            self.erased_now = []
+            self._finish_erasing()
             self._erase_at(pos)
             self._right_erasing = True
             return
@@ -683,7 +683,7 @@ class Overlay(QWidget):
             return
         self._right_erasing = False
         if self.tool == ERASER:
-            self.erased_now = []
+            self._finish_erasing()
             self._erase_at(pos)
             return
         if self.tool == TEXT:
@@ -739,11 +739,15 @@ class Overlay(QWidget):
     def mouseReleaseEvent(self, e):
         self._finish_stroke()
 
-    def _finish_stroke(self):
+    def _finish_erasing(self):
+        """새 지우기를 시작하기 전에 이전 삭제 내역을 이력에 보존."""
         if self.erased_now:
             erased = sorted(self.erased_now, key=lambda t: t[0])
             self.erased_now = []
             self._push(("erase", erased), painted=True)
+
+    def _finish_stroke(self):
+        self._finish_erasing()
         if self.current is not None:
             s = self.current
             self.current = None

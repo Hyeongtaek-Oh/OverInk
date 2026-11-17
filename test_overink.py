@@ -3,9 +3,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from PyQt6.QtCore import QPointF
+from PyQt6.QtCore import QPointF, Qt
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import QApplication
 
@@ -72,6 +72,40 @@ class HistoryTests(unittest.TestCase):
         self.ov.clear()
         self.ov.undo()
         self.assertEqual(self.ov.strokes, [self.stroke])
+
+    def test_overlapping_erase_buttons_preserve_history(self):
+        left, right = Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
+        for first, second in ((left, right), (right, left)):
+            with self.subTest(first=first):
+                a = self.stroke
+                b = overink.Stroke(overink.PEN, QColor("red"), 4,
+                                   [QPointF(200, 50), QPointF(250, 50)])
+                self.ov.strokes = [a, b]
+                self.ov.undo_stack = [("add", a), ("add", b)]
+                self.ov.redo_stack = []
+                self.ov.erased_now = []
+                self.ov.tool = overink.ERASER
+                for button, pos, buttons in (
+                        (first, QPointF(50, 50), first),
+                        (second, QPointF(200, 50), left | right)):
+                    event = Mock()
+                    event.button.return_value = button
+                    event.buttons.return_value = buttons
+                    event.position.return_value = pos
+                    self.ov.mousePressEvent(event)
+                self.ov.mouseReleaseEvent(None)
+                self.ov.mouseReleaseEvent(None)
+                self.assertEqual(self.ov.strokes, [])
+                self.ov.undo()
+                self.assertEqual(self.ov.strokes, [b])
+                self.ov.undo()
+                self.assertEqual(self.ov.strokes, [a, b])
+                self.ov.redo()
+                self.ov.redo()
+                self.assertEqual(self.ov.strokes, [])
+                for _ in range(4):
+                    self.ov.undo()
+                self.assertEqual(self.ov.strokes, [])
 
 
 if __name__ == "__main__":
