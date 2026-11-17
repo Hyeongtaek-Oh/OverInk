@@ -151,7 +151,13 @@ def load_config() -> dict:
         cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         cfg = {}
-    custom = [QColor(c).name() for c in cfg.get("custom", []) if QColor.isValidColorName(c)]
+    if not isinstance(cfg, dict):
+        cfg = {}
+    custom = cfg.get("custom", [])
+    if not isinstance(custom, list):
+        custom = []
+    custom = [QColor(c).name() for c in custom
+              if isinstance(c, str) and QColor.isValidColorName(c)]
     cfg["custom"] = [c for c in dict.fromkeys(custom) if c not in COLORS][:N_CUSTOM]
     cfg.pop("slots", None)  # 이전 버전 형식 정리
     keys = dict(DEFAULT_KEYS)
@@ -557,6 +563,7 @@ class Overlay(QWidget):
 
     def undo(self):
         self.commit_text()
+        self._finish_stroke()
         if not self.undo_stack:
             return
         act = self.undo_stack.pop()
@@ -565,6 +572,7 @@ class Overlay(QWidget):
 
     def redo(self):
         self.commit_text()
+        self._finish_stroke()
         if not self.redo_stack:
             return
         act = self.redo_stack.pop()
@@ -617,6 +625,7 @@ class Overlay(QWidget):
 
     def clear(self):
         self.commit_text()
+        self._finish_stroke()
         if self.strokes:
             self._push(("clear", list(self.strokes)))
             self.strokes = []
@@ -728,12 +737,13 @@ class Overlay(QWidget):
         self.update(old_rect.united(self._cursor_rect()))
 
     def mouseReleaseEvent(self, e):
-        if self.erased_now:
-            self._push(("erase", sorted(self.erased_now, key=lambda t: t[0])), painted=True)
-            self.erased_now = []
         self._finish_stroke()
 
     def _finish_stroke(self):
+        if self.erased_now:
+            erased = sorted(self.erased_now, key=lambda t: t[0])
+            self.erased_now = []
+            self._push(("erase", erased), painted=True)
         if self.current is not None:
             s = self.current
             self.current = None
