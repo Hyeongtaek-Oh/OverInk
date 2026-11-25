@@ -73,6 +73,25 @@ class HistoryTests(unittest.TestCase):
         self.ov.undo()
         self.assertEqual(self.ov.strokes, [self.stroke])
 
+    def test_background_toggle_preserves_drawing_and_history(self):
+        self.ov.undo()  # 진행 중인 삭제를 취소해 그림을 복구
+        self.ov.summon()
+        undo_before = list(self.ov.undo_stack)
+        redo_before = list(self.ov.redo_stack)
+        self.ov.hotkey_toggle()
+        self.assertFalse(self.ov.isVisible())
+        self.assertEqual(self.ov.strokes, [self.stroke])
+        self.ov.hotkey_toggle()
+        self.assertTrue(self.ov.isVisible())
+        self.assertTrue(self.ov.drawing_mode)
+        self.assertEqual(self.ov.strokes, [self.stroke])
+        self.assertEqual(self.ov.undo_stack, undo_before)
+        self.assertEqual(self.ov.redo_stack, redo_before)
+        self.ov.redo()
+        self.assertEqual(self.ov.strokes, [])
+        self.ov.undo()
+        self.assertEqual(self.ov.strokes, [self.stroke])
+
     def test_overlapping_erase_buttons_preserve_history(self):
         left, right = Qt.MouseButton.LeftButton, Qt.MouseButton.RightButton
         for first, second in ((left, right), (right, left)):

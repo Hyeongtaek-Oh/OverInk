@@ -13,7 +13,7 @@
 단축키는 모두 바꿀 수 있음: 툴바 ⚙ 또는 트레이 메뉴 → 단축키 설정 (~/.config/overink.json 에 저장)
 
 기본 전역 단축키 (pynput 설치 시, 어느 모드에서든 동작)
-  Ctrl+Alt+P  대기 → 그리기 / 그리기 → 대기(그림 지움) / 투과 → 그리기
+  Ctrl+Alt+P  대기 → 그리기 / 그리기 → 대기(그림 보존) / 투과 → 그리기
   Ctrl+Alt+C  전체 지우기
   Ctrl+Alt+H  그림 숨기기/보이기
   Ctrl+Alt+Q  종료
@@ -437,12 +437,11 @@ class Overlay(QWidget):
             self.toolbar.raise_()
 
     def dismiss(self):
-        """그림을 지우고(Ctrl+Z로 복구 가능) 화면에서 완전히 숨김."""
+        """그림과 편집 이력을 보존한 채 화면에서 완전히 숨김."""
         self.commit_text()
         self._finish_stroke()
         if self.picking:
             self.end_eyedropper()
-        self.clear()
         self.hide()
         if self.toolbar is not None:
             self.toolbar.hide()
@@ -1233,7 +1232,7 @@ class Toolbar(QWidget):
                              ("👁", ov.toggle_visible, "그림 잠시 숨기기/보이기{visible}"),
                              ("⚙", ov.settingsRequested.emit, "단축키 설정"),
                              ("⌄", ov.dismiss, "백그라운드로 숨기기{toggle}\n"
-                                               "그림은 지워지고, 다시 불렀을 때 실행 취소{undo}로 복구 가능"),
+                                               "그림은 보존되고, 다시 불렀을 때 그대로 표시"),
                              ("✕", QApplication.quit, "OverInk 완전히 종료{quit}")):
             b = button(txt, tip)
             b.clicked.connect(fn)
